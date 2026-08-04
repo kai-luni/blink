@@ -9,6 +9,10 @@ import type { ContextFile } from "../edits/editTracker.js";
 import { ILogger } from "../common/logging.js";
 import { FimTemplates } from "./fimTemplates.js";
 import { token, Inject } from "../di/container.js";
+import { appendFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { writeLlmLog } from "../common/llmDebugLog.js";
 
 export interface CompletionRequestFile {
   path: string;
@@ -59,6 +63,8 @@ export class CompletionEngine implements ICompletionEngine {
     @Inject(CompletionCache) private readonly cache: CompletionCache,
     @ILogger private readonly log?: ILogger,
   ) { }
+
+
 
   setClient(client: CompletionClient): void {
     this.client = client;
@@ -123,16 +129,70 @@ export class CompletionEngine implements ICompletionEngine {
     // });
 
     let raw: string;
+
     try {
       const prompt = fimTemplate.render(req);
 
-      raw = await this.client.complete(prompt, fimTemplate.stop, signal, {
-        prefix: req.prefix,
-        suffix: req.suffix,
+      await writeLlmLog("REQUEST", {
+        repoName: req.repoName,
+        filePath: req.filePath,
+        contextFiles: req.files.map(file => ({
+          path: file.path,
+          contentLength: file.content.length,
+          content: file.content,
+        })),
+        stopTokens: fimTemplate.stop,
+
+        /*
+        * Das ist das von FimTemplates erzeugte Prompt.
+        * Bei Qwen ist darin auch der Repository-Kontext enthalten.
+        */
+        renderedPrompt: prompt,
+
+        /*
+        * Diese Werte werden dem Client zusätzlich gesondert übergeben.
+        * Der Mistral-prefix-suffix-Client kann daraus prompt und suffix
+        * für /v1/fim/completions bilden.
+        */
+        clientContext: {
+          prefix: req.prefix,
+          suffix: req.suffix,
+        },
+      });
+
+      raw = await this.client.complete(
+        prompt,
+        fimTemplate.stop,
+        signal,
+        {
+          prefix: req.prefix,
+          suffix: req.suffix,
+        },
+      );
+
+      await writeLlmLog("RESPONSE", {
+        filePath: req.filePath,
+        responseLength: raw.length,
+        rawResponse: raw,
       });
     } catch (err) {
+      await writeLlmLog("ERROR", {
+        filePath: req.filePath,
+        error: err instanceof Error
+          ? {
+              name: err.name,
+              message: err.message,
+              stack: err.stack,
+            }
+          : String(err),
+      });
+
       this.log?.info(`completion request failed: ${String(err)}`);
-      return { text: null, cacheHit: false };
+
+      return {
+        text: null,
+        cacheHit: false,
+      };
     }
 
     // if (token.isCancellationRequested) { return { text: null, cacheHit: false }; }

@@ -1,10 +1,7 @@
 import * as vscode from "vscode";
-import * as path from "node:path";
 import { IConfigProvider } from "../config/config.js";
 import { matchDisabledFile } from "../config/fileBlacklist.js";
 import type { ModelConfig } from "../config/models.js";
-import { shouldRequest } from "./trigger.js";
-import { delay } from "./debounce.js";
 import { ICompletionEngine } from "../completion/completionEngine.js";
 import { ICompletionComposer } from "../context/composer.js";
 import { Metrics } from "../metrics.js";
@@ -16,9 +13,11 @@ import { ExtensionContext } from "../di/vscodeTokens.js";
 export const DID_ACCEPT_COMMAND = "blink.didAccept";
 
 // Merges with the interface below: one name serves as both type and token.
-export const IInlineCompletionItemProvider = token<IInlineCompletionItemProvider>("inlineProvider");
+export const IInlineCompletionItemProvider =
+  token<IInlineCompletionItemProvider>("inlineProvider");
 
-export interface IInlineCompletionItemProvider extends vscode.InlineCompletionItemProvider {
+export interface IInlineCompletionItemProvider
+  extends vscode.InlineCompletionItemProvider {
   register(): void;
   setEnabled(enabled: boolean): void;
   setModel(model: ModelConfig | undefined): void;
@@ -26,35 +25,59 @@ export interface IInlineCompletionItemProvider extends vscode.InlineCompletionIt
 }
 
 /**
- * Thin VS Code adapter: gates (enabled/trigger/debounce), extracts plain values,
- * delegates context gathering and orchestration to injected collaborators, maps
- * the result to an InlineCompletionItem, and records a metric sample. No
- * completion logic lives here. F5-verified (no unit test).
+ * Thin VS Code adapter: gates requests, gathers context, calls the completion
+ * engine and converts the result into a VS Code inline completion item.
  */
-export class BlinkInlineProvider implements IInlineCompletionItemProvider {
+export class BlinkInlineProvider
+  implements IInlineCompletionItemProvider {
   private _enabled = false;
   private _model: ModelConfig | undefined;
   private _lastPrompt: string | undefined;
 
+  /**
+   * VS Code often requests another completion immediately after an inline
+   * completion was accepted. Suppress that automatic follow-up request briefly.
+   */
+  private suppressRequestsUntil = 0;
+
   constructor(
-    @ExtensionContext private readonly context: vscode.ExtensionContext,
-    @IConfigProvider private readonly config: IConfigProvider,
-    @ICompletionEngine private readonly engine: ICompletionEngine,
-    @ICompletionComposer private readonly composer: ICompletionComposer,
-    @Inject(Metrics) private readonly metrics: Metrics,
-    @Inject(StatusStore) private readonly status: StatusStore,
-    @ILogger private readonly log: ILogger,
-  ) { }
+    @ExtensionContext
+    private readonly extensionContext: vscode.ExtensionContext,
+
+    @IConfigProvider
+    private readonly config: IConfigProvider,
+
+    @ICompletionEngine
+    private readonly engine: ICompletionEngine,
+
+    @ICompletionComposer
+    private readonly composer: ICompletionComposer,
+
+    @Inject(Metrics)
+    private readonly metrics: Metrics,
+
+    @Inject(StatusStore)
+    private readonly status: StatusStore,
+
+    @ILogger
+    private readonly log: ILogger,
+  ) {}
 
   get lastPrompt(): string | undefined {
     return this._lastPrompt;
   }
 
   register(): void {
-    this.context.subscriptions.push(
-      vscode.languages.registerInlineCompletionItemProvider({ pattern: "**" }, this),
-      vscode.workspace.onDidOpenTextDocument((doc) => {
-        if (doc.uri.scheme === "file" || doc.uri.scheme === "untitled") {
+    this.extensionContext.subscriptions.push(
+      vscode.languages.registerInlineCompletionItemProvider(
+        { pattern: "**" },
+        this,
+      ),
+
+      vscode.workspace.onDidOpenTextDocument((document) => {
+        const scheme = document.uri.scheme;
+
+        if (scheme === "file" || scheme === "untitled") {
           this.maybePrewarm();
         }
       }),
@@ -72,95 +95,132 @@ export class BlinkInlineProvider implements IInlineCompletionItemProvider {
   }
 
   /**
-   * Warm the active client's engine when there's something to complete in — a
-   * real file/untitled editor is active and we're enabled with a model. Safe to
-   * call repeatedly: engine.prewarm() is idempotent. Skips other schemes (e.g.
-   * the blink output channel) so activation alone never triggers a load.
+   * Prewarms the active completion client when a normal editor is active.
    */
   private maybePrewarm(): void {
-    if (!this._enabled || !this._model) { return; }
-    const scheme = vscode.window.activeTextEditor?.document.uri.scheme;
+    if (!this._enabled || !this._model) {
+      return;
+    }
+
+    const scheme =
+      vscode.window.activeTextEditor?.document.uri.scheme;
+
     if (scheme === "file" || scheme === "untitled") {
       this.engine.prewarm();
     }
   }
 
+  /**
+   * Returns the final path segment without requiring Node's path module.
+   */
+  private getFileName(document: vscode.TextDocument): string {
+    const uriPath = document.uri.path;
+    const slashIndex = uriPath.lastIndexOf("/");
+
+    if (slashIndex >= 0) {
+      return uriPath.slice(slashIndex + 1);
+    }
+
+    return uriPath;
+  }
+
   async provideInlineCompletionItems(
     document: vscode.TextDocument,
     position: vscode.Position,
-    context: vscode.InlineCompletionContext,
+    _context: vscode.InlineCompletionContext,
     token: vscode.CancellationToken,
   ): Promise<vscode.InlineCompletionItem[] | null> {
     if (!this._enabled || !this._model) {
       return null;
     }
-    const model = this._model;
-    const config = this.config.readConfig();
 
-    if (matchDisabledFile(path.basename(document.fileName), config.disabledFiles)) {
+    /*
+     * Skip the automatic request VS Code commonly triggers immediately after
+     * the user accepts an inline completion.
+     */
+    if (Date.now() < this.suppressRequestsUntil) {
       return null;
     }
 
-    // const line = document.lineAt(position.line).text;
-    // const lineSuffix = line.slice(position.character);
-    // const isInvoke = context.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
-    // if (!shouldRequest(lineSuffix, isInvoke)) {
-    //   return null;
-    // }
+    const config = this.config.readConfig();
+    const fileName = this.getFileName(document);
 
-    // const proceed = await delay(config.debounceMs, token);
-    // if (!proceed) {
-    //   return null;
-    // }
+    if (
+      matchDisabledFile(
+        fileName,
+        config.disabledFiles,
+      )
+    ) {
+      return null;
+    }
 
-    const controller = new AbortController();
-    const sub = token.onCancellationRequested(() => controller.abort());
+    /*
+     * AbortController exists in the VS Code extension-host runtime, but this
+     * project's current TypeScript configuration does not expose its type.
+     */
+    const AbortControllerConstructor = (
+      globalThis as unknown as {
+        AbortController: new () => {
+          signal: any;
+          abort(): void;
+        };
+      }
+    ).AbortController;
 
-    // this.status.setWorking(true);
-    const started = Date.now();
+    const controller = new AbortControllerConstructor();
+
+    const cancellationSubscription =
+      token.onCancellationRequested(() => {
+        controller.abort();
+      });
+
     try {
-      /*
-      ContextBuilder
-        ├─ TextWindowProvider        // before/after cursor
-        ├─ TokenProvider             // current word, line, indentation
-        ├─ SymbolProvider            // current function/class/block
-        ├─ DiagnosticsProvider       // nearby errors/warnings
-        ├─ NativeCompletionProvider  // VS Code/LSP suggestions
-        ├─ ImportProvider            // imports in current file
-        ├─ WorkspaceProvider         // relevant files / specs / package.json
-        └─ DomainProvider            // HTTL/OpenAPI/appa-specific context
-      */
-      // const fullText = document.getText();
-      // const cursorOffset = document.offsetAt(position);
+      const completionRequest =
+        await this.composer.compose(
+          document,
+          position,
+          config,
+        );
 
-      // const filePath = document.isUntitled
-      //   ? undefined
-      //   : vscode.workspace.asRelativePath(document.uri);
-
-      // const repoName = vscode.workspace.workspaceFolders?.[0]?.name ?? "workspace";
-
-      const completionRequest = await this.composer.compose(document, position, config);
-
-      const { text, cacheHit } = await this.engine.complete(completionRequest, controller.signal);
-
-      // const latencyMs = Date.now() - started;
-      if (text === null || token.isCancellationRequested) {
-        // this.metrics.recordServed({ latencyMs, cacheHit, served: false });
+      if (
+        token.isCancellationRequested ||
+        controller.signal.aborted
+      ) {
         return null;
       }
 
-      // this.metrics.recordServed({ latencyMs, cacheHit, served: true });
-      // this.log.info(`blink: ${cacheHit ? "hit" : "miss"} ${latencyMs}ms len=${text.length}`);
+      const result = await this.engine.complete(
+        completionRequest,
+        controller.signal,
+      );
 
-      const item = new vscode.InlineCompletionItem(text, new vscode.Range(position, position));
-      item.command = { title: "", command: DID_ACCEPT_COMMAND };
+      if (
+        result.text === null ||
+        result.text.length === 0 ||
+        token.isCancellationRequested
+      ) {
+        return null;
+      }
+
+      const item = new vscode.InlineCompletionItem(
+        result.text,
+        new vscode.Range(position, position),
+      );
+
+      item.command = {
+        title: "",
+        command: DID_ACCEPT_COMMAND,
+      };
+
       return [item];
-    } catch (err) {
-      this.log.info(`provideInlineCompletionItems error: ${String(err)}`);
+    } catch (error) {
+      this.log.info(
+        `provideInlineCompletionItems error: ${String(error)}`,
+      );
+
       return null;
     } finally {
-      // this.status.setWorking(false);
-      sub.dispose();
+      cancellationSubscription.dispose();
     }
   }
 }

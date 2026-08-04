@@ -46,6 +46,76 @@ export class CompletionComposer implements ICompletionComposer {
 
     const files: CompletionRequestFile[] = [];
 
+    const MAX_OPEN_TABS = 4;
+    const MAX_TOTAL_CONTEXT_CHARS = 80_000;
+
+    let totalContextChars = 0;
+
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (!(tab.input instanceof vscode.TabInputText)) {
+          continue;
+        }
+
+        const uri = tab.input.uri;
+
+        // Aktuelle Datei nicht doppelt einfügen.
+        if (uri.toString() === document.uri.toString()) {
+          continue;
+        }
+
+        // Nur normale Dateien, keine Settings-, Output- oder virtuellen Dokumente.
+        if (uri.scheme !== "file") {
+          continue;
+        }
+
+        // Nur Dateien aus dem aktuellen Workspace.
+        if (!vscode.workspace.getWorkspaceFolder(uri)) {
+          continue;
+        }
+
+        if (files.length >= MAX_OPEN_TABS) {
+          break;
+        }
+
+        const remainingChars =
+          MAX_TOTAL_CONTEXT_CHARS - totalContextChars;
+
+        if (remainingChars <= 0) {
+          break;
+        }
+
+        try {
+          const openDocument =
+            await vscode.workspace.openTextDocument(uri);
+
+          const fullContent = openDocument.getText();
+
+          if (!fullContent.trim()) {
+            continue;
+          }
+
+          const content = fullContent.slice(0, remainingChars);
+
+          files.push({
+            path: vscode.workspace.asRelativePath(uri),
+            content,
+          });
+
+          totalContextChars += content.length;
+        } catch {
+          // Einzelne nicht lesbare Tabs einfach überspringen.
+        }
+      }
+
+      if (
+        files.length >= MAX_OPEN_TABS ||
+        totalContextChars >= MAX_TOTAL_CONTEXT_CHARS
+      ) {
+        break;
+      }
+    }
+
     // Unit tests drive compose() with minimal fakes that have no uri; skip the
     // completion-provider lookup for them (real documents always carry one).
     const completions = document.uri
@@ -70,6 +140,18 @@ export class CompletionComposer implements ICompletionComposer {
       prefix = `/*
 context: {\n${completionItems.map(x => `${x.label}: ${x.insertText},`).join('\n')}\n}
 */\n` + prefix;
+    }
+
+    if (files.length > 0) {
+      const openTabsContext = files
+        .map(file => `### ${file.path}\n${file.content}`)
+        .join("\n\n");
+
+      prefix = [
+        openTabsContext,
+        `### ${filePath ?? "untitled"}`,
+        prefix,
+      ].join("\n\n");
     }
 
 

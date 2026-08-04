@@ -1,6 +1,7 @@
 import type { FimParts, ManagedClient } from "../types.js";
 import { requestTimeoutFor, type ModelConfig, type OpenAiModelConfig } from "../../config/models.js";
 import type { ILogger } from "../../common/logging.js";
+import { writeLlmLog } from "../../common/llmDebugLog.js";
 
 interface OpenAiOpts {
   baseUrl: string;
@@ -63,9 +64,25 @@ export class OpenAICompletionClient implements ManagedClient {
     const base = opts.baseUrl.replace(/\/+$/, "");
     const url = base.endsWith("/completions") ? base : `${base}/completions`;
 
-    const fim = opts.promptStyle === "prefix-suffix" && parts
-      ? { prompt: parts.prefix, suffix: parts.suffix }
-      : { prompt };
+    const usesPrefixSuffix =
+      opts.promptStyle === "prefix-suffix" && parts !== undefined;
+
+    const fim = usesPrefixSuffix
+      ? {
+          prompt: parts.prefix,
+          suffix: parts.suffix,
+        }
+      : {
+          prompt,
+        };
+
+    const requestBody = {
+      model: opts.model,
+      ...fim,
+      max_tokens: opts.maxTokens,
+      temperature: 0,
+      stop,
+    };
 
     const internalController = new AbortController();
     const timer = setTimeout(() => internalController.abort(), opts.timeoutMs);
@@ -79,19 +96,21 @@ export class OpenAICompletionClient implements ManagedClient {
       if (internalController.signal.aborted) {
         return "";
       }
+      await writeLlmLog("HTTP_REQUEST", {
+        url,
+        method: "POST",
+        promptStyle: opts.promptStyle,
+        usesPrefixSuffix,
+        requestBody,
+      });
+
       const res = await this.fetchFn(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${opts.apiKey}`,
         },
-        body: JSON.stringify({
-          model: opts.model,
-          ...fim,
-          max_tokens: opts.maxTokens,
-          temperature: 0,
-          stop,
-        }),
+        body: JSON.stringify(requestBody),
         signal: internalController.signal,
       });
 
