@@ -82,6 +82,36 @@ export function activate(
 ): void {
   const logger = new Logger(context);
 
+  // Visible immediately, before the DI graph is constructed.
+  // If activation fails, this remains visible and shows the failure.
+  const startupStatus = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    101,
+  );
+
+  startupStatus.text = "$(loading~spin) blink";
+  startupStatus.tooltip = "blink wird gestartet …";
+  startupStatus.show();
+
+  context.subscriptions.push(startupStatus);
+
+  const version = String(
+    context.extension.packageJSON.version ?? "unknown",
+  );
+
+  logger.info("blink activation started");
+  logger.info(`version: ${version}`);
+  logger.info(
+    `mode: ${
+      context.extensionMode === vscode.ExtensionMode.Development
+        ? "development"
+        : context.extensionMode === vscode.ExtensionMode.Test
+          ? "test"
+          : "production"
+    }`,
+  );
+  logger.info(`path: ${context.extensionPath}`);
+
   try {
     const c = new Container();
 
@@ -198,15 +228,33 @@ export function activate(
 
     c.register(BlinkExtension);
 
+    logger.info("creating BlinkExtension");
+
     blink = c.get(BlinkExtension);
+
+    logger.info("starting BlinkExtension");
+
     blink.start();
 
-    logger.info("blink activated");
+    logger.info("blink ready");
+
+    // The regular BlinkStatusBar has now been created by blink.start().
+    startupStatus.dispose();
   } catch (error) {
     const details =
       error instanceof Error
         ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
         : String(error);
+
+    startupStatus.text = "$(error) blink";
+    startupStatus.tooltip =
+      "blink konnte nicht gestartet werden. Siehe Output → blink.";
+
+    // Clicking the failed status opens the log immediately.
+    startupStatus.command = {
+      command: "workbench.action.output.toggleOutput",
+      title: "blink-Log anzeigen",
+    };
 
     logger.error(
       `Error activating Blink extension:\n${details}`,
