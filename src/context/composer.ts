@@ -47,6 +47,7 @@ export class CompletionComposer implements ICompletionComposer {
     const files: CompletionRequestFile[] = [];
 
     const MAX_OPEN_TABS = 4;
+    const MAX_CHARS_PER_TAB = 20_000;
     const MAX_TOTAL_CONTEXT_CHARS = 80_000;
 
     let totalContextChars = 0;
@@ -59,21 +60,35 @@ export class CompletionComposer implements ICompletionComposer {
 
         const uri = tab.input.uri;
 
-        // Aktuelle Datei nicht doppelt einfügen.
+        // Do not include the active file as additional context.
+        // Its prefix and suffix are already passed separately.
         if (uri.toString() === document.uri.toString()) {
           continue;
         }
 
-        // Nur normale Dateien, keine Settings-, Output- oder virtuellen Dokumente.
+        // Only include regular files, not settings, output, or virtual documents.
         if (uri.scheme !== "file") {
           continue;
         }
 
-        // Nur Dateien aus dem aktuellen Workspace.
+        // Only include files from the current workspace.
         if (!vscode.workspace.getWorkspaceFolder(uri)) {
           continue;
         }
 
+        // Never send .env files to the LLM.
+        // This also excludes files such as .env.local and .env.production.
+        const fileName =
+          uri.path.split("/").pop()?.toLowerCase() ?? "";
+
+        if (
+          fileName === ".env" ||
+          fileName.startsWith(".env.")
+        ) {
+          continue;
+        }
+
+        // Take the first four eligible open tabs after applying all exclusions.
         if (files.length >= MAX_OPEN_TABS) {
           break;
         }
@@ -95,7 +110,13 @@ export class CompletionComposer implements ICompletionComposer {
             continue;
           }
 
-          const content = fullContent.slice(0, remainingChars);
+          const allowedChars = Math.min(
+            MAX_CHARS_PER_TAB,
+            remainingChars,
+          );
+
+          const content =
+            fullContent.slice(0, allowedChars);
 
           files.push({
             path: vscode.workspace.asRelativePath(uri),
@@ -104,7 +125,7 @@ export class CompletionComposer implements ICompletionComposer {
 
           totalContextChars += content.length;
         } catch {
-          // Einzelne nicht lesbare Tabs einfach überspringen.
+          // Skip individual tabs that cannot be read.
         }
       }
 

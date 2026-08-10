@@ -1,5 +1,9 @@
 import type { FimParts, ManagedClient } from "../types.js";
-import { requestTimeoutFor, type ModelConfig, type OpenAiModelConfig } from "../../config/models.js";
+import {
+  requestTimeoutFor,
+  type ModelConfig,
+  type OpenAiModelConfig,
+} from "../../config/models.js";
 import type { ILogger } from "../../common/logging.js";
 import { writeLlmLog } from "../../common/llmDebugLog.js";
 
@@ -25,11 +29,13 @@ export class OpenAICompletionClient implements ManagedClient {
   constructor(
     private readonly fetchFn: typeof fetch = fetch,
     private readonly logger?: ILogger,
-  ) { }
+  ) {}
 
   setConfig(model: ModelConfig): void {
     const m = model as OpenAiModelConfig;
+
     this.model = m;
+
     this.opts = {
       baseUrl: m.apiBaseUrl,
       apiKey: m.apiKey,
@@ -41,35 +47,58 @@ export class OpenAICompletionClient implements ManagedClient {
   }
 
   onLoadError(): void {
-    // stateless HTTP client — no load step, nothing to report
+    // Stateless HTTP client — no load step, nothing to report.
   }
 
   async dispose(): Promise<void> {
-    // stateless HTTP client — nothing to tear down
+    // Stateless HTTP client — nothing to tear down.
   }
 
   public get config(): ModelConfig | undefined {
     return this.model;
   }
 
-  /** The configured model's FIM token; null before setConfig (auto template). */
+  /**
+   * The configured model's FIM token; null before setConfig
+   * (auto template).
+   */
   public async getFimPrefix(): Promise<string | null> {
     return this.model?.fim ?? null;
   }
 
-  async complete(prompt: string, stop: string[], signal: AbortSignal, parts?: FimParts): Promise<string> {
+  async complete(
+    prompt: string,
+    stop: string[],
+    signal: AbortSignal,
+    parts?: FimParts,
+  ): Promise<string> {
     const opts = this.opts;
-    if (!opts) { return ""; }
+
+    if (!opts) {
+      return "";
+    }
 
     const base = opts.baseUrl.replace(/\/+$/, "");
-    const url = base.endsWith("/completions") ? base : `${base}/completions`;
+    const url = base.endsWith("/completions")
+      ? base
+      : `${base}/completions`;
 
     const usesPrefixSuffix =
-      opts.promptStyle === "prefix-suffix" && parts !== undefined;
+      opts.promptStyle === "prefix-suffix" &&
+      parts !== undefined;
+
+    /*
+     * Mistral's FIM endpoint receives prefix and suffix separately.
+     *
+     * Keep the instruction deliberately small. It is only added for the
+     * prefix-suffix path, so raw/FIM-template based models remain untouched.
+     */
+    const completionInstruction =
+      "// Use English for new comments unless surrounding comments use another language.\n";
 
     const fim = usesPrefixSuffix
       ? {
-          prompt: parts.prefix,
+          prompt: `${completionInstruction}${parts.prefix}`,
           suffix: parts.suffix,
         }
       : {
@@ -85,9 +114,18 @@ export class OpenAICompletionClient implements ManagedClient {
     };
 
     const internalController = new AbortController();
-    const timer = setTimeout(() => internalController.abort(), opts.timeoutMs);
-    const onAbort = () => internalController.abort();
+
+    const timer = setTimeout(
+      () => internalController.abort(),
+      opts.timeoutMs,
+    );
+
+    const onAbort = () => {
+      internalController.abort();
+    };
+
     signal.addEventListener("abort", onAbort);
+
     if (signal.aborted) {
       internalController.abort();
     }
@@ -96,6 +134,7 @@ export class OpenAICompletionClient implements ManagedClient {
       if (internalController.signal.aborted) {
         return "";
       }
+
       await writeLlmLog("HTTP_REQUEST", {
         url,
         method: "POST",
@@ -116,18 +155,40 @@ export class OpenAICompletionClient implements ManagedClient {
 
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        this.logger?.info(`openai completion failed: HTTP ${res.status} ${body.slice(0, 200)}`);
+
+        this.logger?.info(
+          `openai completion failed: HTTP ${res.status} ${body.slice(0, 200)}`,
+        );
+
         return "";
       }
-      // Classic completions return choices[].text; Mistral's FIM endpoint
-      // answers in the chat shape, choices[].message.content.
+
+      /*
+       * Classic completions return choices[].text.
+       * Mistral's FIM endpoint may answer in the chat-style shape
+       * choices[].message.content.
+       */
       const data = (await res.json()) as {
-        choices?: Array<{ text?: string; message?: { content?: string } }>;
+        choices?: Array<{
+          text?: string;
+          message?: {
+            content?: string;
+          };
+        }>;
       };
+
       const choice = data.choices?.[0];
-      return choice?.text ?? choice?.message?.content ?? "";
+
+      return (
+        choice?.text ??
+        choice?.message?.content ??
+        ""
+      );
     } catch (error) {
-      this.logger?.info(`openai completion failed: ${error}`);
+      this.logger?.info(
+        `openai completion failed: ${String(error)}`,
+      );
+
       return "";
     } finally {
       clearTimeout(timer);
