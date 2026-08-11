@@ -16,12 +16,22 @@ interface OpenAiOpts {
   promptStyle: "raw" | "prefix-suffix";
 }
 
-/**
- * Minimal OpenAI-compatible /v1/completions client. `fetchFn` is injectable so
- * the orchestrator can be tested without real network access. Config is applied
- * via setConfig (the manager calls it before each use). Never throws on
- * HTTP/transport failure — returns "" so the editor shows nothing.
- */
+interface CompletionResponse {
+  choices?: Array<{
+    text?: string;
+    finish_reason?: string;
+  }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+const DEEPSEEK_FIM_BEGIN = "<｜fim▁begin｜>";
+const DEEPSEEK_FIM_HOLE = "<｜fim▁hole｜>";
+const DEEPSEEK_FIM_END = "<｜fim▁end｜>";
+
 export class OpenAICompletionClient implements ManagedClient {
   private opts: OpenAiOpts | undefined;
   private model: OpenAiModelConfig | undefined;
@@ -47,21 +57,17 @@ export class OpenAICompletionClient implements ManagedClient {
   }
 
   onLoadError(): void {
-    // Stateless HTTP client — no load step, nothing to report.
+    // Stateless HTTP client.
   }
 
   async dispose(): Promise<void> {
-    // Stateless HTTP client — nothing to tear down.
+    // Stateless HTTP client.
   }
 
   public get config(): ModelConfig | undefined {
     return this.model;
   }
 
-  /**
-   * The configured model's FIM token; null before setConfig
-   * (auto template).
-   */
   public async getFimPrefix(): Promise<string | null> {
     return this.model?.fim ?? null;
   }
@@ -78,47 +84,31 @@ export class OpenAICompletionClient implements ManagedClient {
       return "";
     }
 
-    const base = opts.baseUrl.replace(/\/+$/, "");
-    const url = base.endsWith("/completions")
-      ? base
-      : `${base}/completions`;
-
     const usesPrefixSuffix =
       opts.promptStyle === "prefix-suffix" &&
       parts !== undefined;
 
-    /*
-     * Mistral's FIM endpoint receives prefix and suffix separately.
-     *
-     * Keep the instruction deliberately small. It is only added for the
-     * prefix-suffix path, so raw/FIM-template based models remain untouched.
-     */
-    const completionInstruction =
-      "// Use English for new comments unless surrounding comments use another language.\n";
+    const usesDeepSeekFim =
+      opts.promptStyle === "raw" &&
+      this.isDeepSeekFimModel(opts.model) &&
+      parts !== undefined;
 
-    const fim = usesPrefixSuffix
-      ? {
-          prompt: `${completionInstruction}${parts.prefix}`,
-          suffix: parts.suffix,
-        }
-      : {
-          prompt,
-        };
+    const url = this.buildCompletionUrl(opts.baseUrl);
 
-    const requestBody = {
-      model: opts.model,
-      ...fim,
-      max_tokens: opts.maxTokens,
-      temperature: 0,
+    const requestBody = this.buildCompletionRequest(
+      opts,
+      prompt,
       stop,
-    };
+      parts,
+      usesPrefixSuffix,
+      usesDeepSeekFim,
+    );
 
     const internalController = new AbortController();
 
-    const timer = setTimeout(
-      () => internalController.abort(),
-      opts.timeoutMs,
-    );
+    const timer = setTimeout(() => {
+      internalController.abort();
+    }, opts.timeoutMs);
 
     const onAbort = () => {
       internalController.abort();
@@ -140,6 +130,7 @@ export class OpenAICompletionClient implements ManagedClient {
         method: "POST",
         promptStyle: opts.promptStyle,
         usesPrefixSuffix,
+        usesDeepSeekFim,
         requestBody,
       });
 
@@ -153,38 +144,61 @@ export class OpenAICompletionClient implements ManagedClient {
         signal: internalController.signal,
       });
 
+      const rawBody = await res.text();
+
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
+        await writeLlmLog("HTTP_RAW_RESPONSE", {
+          status: res.status,
+          statusText: res.statusText,
+          body: rawBody,
+        });
 
         this.logger?.info(
-          `openai completion failed: HTTP ${res.status} ${body.slice(0, 200)}`,
+          `openai completion failed: HTTP ${res.status} ${rawBody.slice(0, 200)}`,
         );
 
         return "";
       }
 
-      /*
-       * Classic completions return choices[].text.
-       * Mistral's FIM endpoint may answer in the chat-style shape
-       * choices[].message.content.
-       */
-      const data = (await res.json()) as {
-        choices?: Array<{
-          text?: string;
-          message?: {
-            content?: string;
-          };
-        }>;
-      };
+      let data: CompletionResponse;
 
-      const choice = data.choices?.[0];
+      try {
+        data = JSON.parse(rawBody) as CompletionResponse;
+      } catch (error) {
+        await writeLlmLog("HTTP_RAW_RESPONSE", {
+          status: res.status,
+          statusText: res.statusText,
+          body: rawBody,
+          parseError: String(error),
+        });
 
-      return (
-        choice?.text ??
-        choice?.message?.content ??
-        ""
-      );
+        this.logger?.info(
+          `openai completion returned invalid JSON: ${String(error)}`,
+        );
+
+        return "";
+      }
+
+      await writeLlmLog("HTTP_RAW_RESPONSE", {
+        status: res.status,
+        statusText: res.statusText,
+        body: rawBody,
+        data,
+      });
+
+      const text = data.choices?.[0]?.text;
+
+      return typeof text === "string"
+        ? text
+        : "";
     } catch (error) {
+      await writeLlmLog("HTTP_ERROR", {
+        url,
+        error: String(error),
+        aborted: internalController.signal.aborted,
+        timeoutMs: opts.timeoutMs,
+      });
+
       this.logger?.info(
         `openai completion failed: ${String(error)}`,
       );
@@ -194,5 +208,94 @@ export class OpenAICompletionClient implements ManagedClient {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  private buildCompletionUrl(baseUrl: string): string {
+    const base = baseUrl.replace(/\/+$/, "");
+
+    if (base.endsWith("/completions")) {
+      return base;
+    }
+
+    return `${base}/completions`;
+  }
+
+  private buildCompletionRequest(
+    opts: OpenAiOpts,
+    prompt: string,
+    stop: string[],
+    parts: FimParts | undefined,
+    usesPrefixSuffix: boolean,
+    usesDeepSeekFim: boolean,
+  ): Record<string, unknown> {
+    /*
+     * DeepSeek native FIM.
+     *
+     * Example:
+     *
+     * <｜fim▁begin｜>
+     * prefix
+     * <｜fim▁hole｜>
+     * suffix
+     * <｜fim▁end｜>
+     *
+     * Important:
+     * These characters are intentional. Do not replace the full-width
+     * vertical bars or the ▁ character with ordinary ASCII characters.
+     */
+    if (usesDeepSeekFim && parts) {
+      const fimPrompt =
+        DEEPSEEK_FIM_BEGIN +
+        parts.prefix +
+        DEEPSEEK_FIM_HOLE +
+        parts.suffix +
+        DEEPSEEK_FIM_END;
+
+      return {
+        model: opts.model,
+        prompt: fimPrompt,
+        max_tokens: opts.maxTokens,
+        temperature: 0.1,
+        frequency_penalty: 0.2,
+        ...(stop.length > 0 ? { stop } : {}),
+      };
+    }
+
+    /*
+     * Native prefix/suffix API, e.g. Mistral Codestral.
+     */
+    if (usesPrefixSuffix && parts) {
+      const completionInstruction =
+        "// Use English for new comments unless surrounding comments use another language.\n";
+
+      return {
+        model: opts.model,
+        prompt: `${completionInstruction}${parts.prefix}`,
+        suffix: parts.suffix,
+        max_tokens: opts.maxTokens,
+        temperature: 0,
+        ...(stop.length > 0 ? { stop } : {}),
+      };
+    }
+
+    /*
+     * Generic raw completion.
+     *
+     * The prompt has already been rendered by Blink.
+     */
+    return {
+      model: opts.model,
+      prompt,
+      max_tokens: opts.maxTokens,
+      temperature: 0,
+      ...(stop.length > 0 ? { stop } : {}),
+    };
+  }
+
+  private isDeepSeekFimModel(model: string): boolean {
+    return (
+      /^deepseek-ai\/deepseek-v4/i.test(model) ||
+      /^deepseek-v4/i.test(model)
+    );
   }
 }
