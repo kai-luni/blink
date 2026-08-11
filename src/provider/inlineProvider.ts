@@ -11,6 +11,7 @@ import { token, Inject } from "../di/container.js";
 import { ExtensionContext } from "../di/vscodeTokens.js";
 
 export const DID_ACCEPT_COMMAND = "blink.didAccept";
+export const TAB_ACCEPT_COMMAND = "blink.tabAccept";
 
 // Merges with the interface below: one name serves as both type and token.
 export const IInlineCompletionItemProvider =
@@ -35,8 +36,9 @@ export class BlinkInlineProvider
   private _lastPrompt: string | undefined;
 
   /**
-   * VS Code often requests another completion immediately after an inline
-   * completion was accepted. Suppress that automatic follow-up request briefly.
+   * After Tab accepts an inline suggestion, VS Code immediately asks for
+   * another suggestion. Suppress requests for a short moment so the editor
+   * stays quiet after acceptance.
    */
   private suppressRequestsUntil = 0;
 
@@ -72,6 +74,27 @@ export class BlinkInlineProvider
       vscode.languages.registerInlineCompletionItemProvider(
         { pattern: "**" },
         this,
+      ),
+
+      /*
+       * Used by the Tab keybinding when an inline suggestion is visible.
+       *
+       * First suppress follow-up requests, then let VS Code accept the
+       * currently visible inline suggestion.
+       */
+      vscode.commands.registerCommand(
+        TAB_ACCEPT_COMMAND,
+        async () => {
+          this.suppressRequestsUntil = Date.now() + 500;
+
+          this.log.info(
+            "suppressing inline completions after Tab",
+          );
+
+          await vscode.commands.executeCommand(
+            "editor.action.inlineSuggest.commit",
+          );
+        },
       ),
 
       vscode.workspace.onDidOpenTextDocument((document) => {
@@ -135,8 +158,8 @@ export class BlinkInlineProvider
     }
 
     /*
-     * Skip the automatic request VS Code commonly triggers immediately after
-     * the user accepts an inline completion.
+     * Do not immediately generate another completion after Tab accepted
+     * the previous one.
      */
     if (Date.now() < this.suppressRequestsUntil) {
       return null;

@@ -19,6 +19,9 @@ interface OpenAiOpts {
 interface CompletionResponse {
   choices?: Array<{
     text?: string;
+    message?: {
+      content?: string;
+    };
     finish_reason?: string;
   }>;
   usage?: {
@@ -186,11 +189,9 @@ export class OpenAICompletionClient implements ManagedClient {
         data,
       });
 
-      const text = data.choices?.[0]?.text;
+      const choice = data.choices?.[0];
 
-      return typeof text === "string"
-        ? text
-        : "";
+      return choice?.text ?? choice?.message?.content ?? "";
     } catch (error) {
       await writeLlmLog("HTTP_ERROR", {
         url,
@@ -231,17 +232,12 @@ export class OpenAICompletionClient implements ManagedClient {
     /*
      * DeepSeek native FIM.
      *
-     * Example:
+     * Format:
      *
-     * <｜fim▁begin｜>
-     * prefix
-     * <｜fim▁hole｜>
-     * suffix
-     * <｜fim▁end｜>
+     * <｜fim▁begin｜>prefix<｜fim▁hole｜>suffix<｜fim▁end｜>
      *
      * Important:
-     * These characters are intentional. Do not replace the full-width
-     * vertical bars or the ▁ character with ordinary ASCII characters.
+     * The full-width vertical bars and ▁ character are intentional.
      */
     if (usesDeepSeekFim && parts) {
       const fimPrompt =
@@ -262,7 +258,9 @@ export class OpenAICompletionClient implements ManagedClient {
     }
 
     /*
-     * Native prefix/suffix API, e.g. Mistral Codestral.
+     * Native prefix/suffix API.
+     *
+     * Used by Mistral Codestral.
      */
     if (usesPrefixSuffix && parts) {
       const completionInstruction =
@@ -280,8 +278,6 @@ export class OpenAICompletionClient implements ManagedClient {
 
     /*
      * Generic raw completion.
-     *
-     * The prompt has already been rendered by Blink.
      */
     return {
       model: opts.model,
