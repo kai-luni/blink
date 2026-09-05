@@ -251,8 +251,9 @@ export class OpenAICompletionClient implements ManagedClient {
         model: opts.model,
         prompt: fimPrompt,
         max_tokens: opts.maxTokens,
-        temperature: 0.1,
+        temperature: 0.5,
         frequency_penalty: 0.2,
+        repetition_penalty: 1.05,
         ...(stop.length > 0 ? { stop } : {}),
       };
     }
