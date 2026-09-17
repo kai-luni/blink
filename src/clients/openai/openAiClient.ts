@@ -43,14 +43,6 @@ const DEEPSEEK_FIM_END = "<｜fim▁end｜>";
  */
 const DEEPSEEK_FIM_MAX_TOKENS = 512;
 
-/**
- * Stop at the first blank line as well. The DeepSeek prompt carries the open-tabs
- * context, and without this the model continues that document instead of filling the
- * hole (measured: 1139 -> 111 characters of output; both line endings, because the
- * files arrive with \r\n).
- */
-const DEEPSEEK_FIM_EXTRA_STOP = ["\n\n", "\r\n\r\n"];
-
 /** Suffix sent with the probe: long enough to visibly move the prompt token count. */
 const PROBE_SUFFIX = "// suffix support probe line\n".repeat(8);
 
@@ -317,7 +309,13 @@ export class OpenAICompletionClient implements ManagedClient {
         data,
       });
 
+      
       const choice = data.choices?.[0];
+
+      this.logger?.info(
+        `openai completion finished: reason=${choice?.finish_reason ?? "unknown"}, ` +
+        `tokens=${data.usage?.completion_tokens ?? "unknown"}`,
+      );
 
       return choice?.text ?? choice?.message?.content ?? "";
     } catch (error) {
@@ -386,7 +384,7 @@ export class OpenAICompletionClient implements ManagedClient {
         temperature: 0.2,
         frequency_penalty: 0.2,
         repetition_penalty: 1.05,
-        stop: [...new Set([...stop, DEEPSEEK_FIM_END, ...DEEPSEEK_FIM_EXTRA_STOP])],
+        stop: [...new Set([...stop, DEEPSEEK_FIM_END])],
       };
     }
 
