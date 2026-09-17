@@ -1,5 +1,20 @@
 # Change Log
 
+## [0.2.2] — 2026-09-17
+
+- **The cursor's completion items are out of the prompt.** Measured against
+  DeepSeek-V4.1-Flash (Nebius): up to 80 items — for a TypeScript file the whole
+  global symbol table — turned a completion into a 12.603-character request, of
+  which only 464 characters were the real prefix before the cursor. With that much
+  noise ahead of the FIM hole the model continued the "### <file>" document instead
+  of filling the hole. The **open tabs stay** in the prompt; the lookup also no
+  longer costs a `executeCompletionItemProvider` round-trip per completion.
+- **DeepSeek FIM path tuned** (`openAiClient`): `max_tokens` capped at 512 (a loop
+  with the entry's 25600 kept writing whole blocks), `temperature` 0.5 → 0.2
+  (0.7 produced a pure repetition loop), and `stop` now carries the blank-line
+  breaks (`\n\n`, `\r\n\r\n`) next to the FIM end token — measured effect:
+  1139 → 111 characters of output, focused instead of document-wide.
+
 ## [0.2.1] — 2026-09-17
 
 - **Endpoints that silently drop the `suffix` field are detected.** With
