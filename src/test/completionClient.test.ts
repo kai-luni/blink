@@ -262,6 +262,22 @@ suite("OpenAICompletionClient — suffix support probe", () => {
     );
   });
 
+  test("a prefix-suffix entry keeps the context inside the prompt (no FIM markers there)", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(openAiModel({
+      promptStyle: "prefix-suffix", apiBaseUrl: "https://api.mistral.ai/v1/fim/completions",
+      modelId: "codestral-latest", maxTokens: 10, requestTimeoutMs: 1000,
+    }));
+    await client.complete("RENDERED", [], new AbortController().signal, {
+      prefix: "const x = ", suffix: ";", contextPrefix: "### package.json\n{}",
+    });
+    const prompt = String(captured.body.prompt);
+    assert.ok(prompt.includes("### package.json"), `context lost: ${JSON.stringify(prompt)}`);
+    assert.ok(prompt.endsWith("const x = "), `prefix missing: ${JSON.stringify(prompt)}`);
+    assert.strictEqual(captured.body.suffix, ";");
+  });
+
   test("after an 'ignored' verdict a plain prefix-suffix entry falls back to the rendered prompt", async () => {
     const captured: any = {};
     let calls = 0;
@@ -339,20 +355,22 @@ suite("OpenAICompletionClient — DeepSeek-V4.1-Flash (Nebius)", () => {
     assert.strictEqual(called, 0);
   });
 
-  test("stop carries the FIM end token and the blank-line breaks, deduplicated", async () => {
+  test("stop carries the FIM end token, deduplicated — the blank-line stops are gone", async () => {
     const captured: any = {};
     const client = new OpenAICompletionClient(fakeFetch(captured) as any);
     client.setConfig(deepSeekEntry());
     await client.complete("P", ["</s>", "\n\n"], new AbortController().signal, { prefix: "a", suffix: "b" });
-    assert.deepStrictEqual(captured.body.stop, ["</s>", "\n\n", DS_END, "\r\n\r\n"]);
+    // The engine's stop list passes through, plus the FIM end marker; a blank line is
+    // NOT a stop any more (removed in 3fcd7a2), so multi-block answers survive.
+    assert.deepStrictEqual(captured.body.stop, ["</s>", "\n\n", DS_END]);
   });
 
-  test("max_tokens is capped for the FIM path (the entry's 25600 would run away on a loop)", async () => {
+  test("max_tokens is capped for the FIM path (measured: 512 yielded 1700-character answers)", async () => {
     const captured: any = {};
     const client = new OpenAICompletionClient(fakeFetch(captured) as any);
     client.setConfig(deepSeekEntry({ maxTokens: 25600 }));
     await client.complete("P", [], new AbortController().signal, { prefix: "a", suffix: "b" });
-    assert.strictEqual(captured.body.max_tokens, 512);
+    assert.strictEqual(captured.body.max_tokens, 192);
   });
 
   test("a smaller maxTokens from the entry wins over the cap", async () => {
@@ -377,5 +395,18 @@ suite("OpenAICompletionClient — DeepSeek-V4.1-Flash (Nebius)", () => {
     client.setConfig(deepSeekEntry({ apiBaseUrl: "https://api.deepseek.com/beta", modelId: "deepseek-v4-pro" }));
     await client.complete("GENERIC", [], new AbortController().signal, { prefix: "a", suffix: "b" });
     assert.strictEqual(captured.body.prompt, DS_BEGIN + "a" + DS_HOLE + "b" + DS_END);
+  });
+
+  test("the open-tab context stays outside the FIM markers", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry());
+    await client.complete("GENERIC", [], new AbortController().signal, {
+      prefix: "a", suffix: "b", contextPrefix: "### package.json\n{}",
+    });
+    assert.strictEqual(
+      captured.body.prompt,
+      "### package.json\n{}\n\n" + DS_BEGIN + "a" + DS_HOLE + "b" + DS_END,
+    );
   });
 });

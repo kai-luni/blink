@@ -43,6 +43,7 @@ export class CompletionComposer implements ICompletionComposer {
 
     let prefix = fullText.slice(0, cursorOffset);
     const suffix = fullText.slice(cursorOffset);
+    let contextPrefix = "";
 
     const files: CompletionRequestFile[] = [];
 
@@ -153,15 +154,20 @@ export class CompletionComposer implements ICompletionComposer {
      * "/* context: ..." prefix prepend) is in the commit before this one.
      */
 
+    /*
+     * The open tabs are returned as their own field instead of being glued into
+     * `prefix`: a FIM endpoint must be able to keep the reference context *outside*
+     * its begin/hole/end markers. Everything else (engine prompt rendering, Mistral's
+     * prefix-suffix body) still puts it in front of the file prefix.
+     */
     if (files.length > 0) {
       const openTabsContext = files
         .map(file => `### ${file.path}\n${file.content}`)
         .join("\n\n");
 
-      prefix = [
+      contextPrefix = [
         openTabsContext,
         `### ${filePath ?? "untitled"}`,
-        prefix,
       ].join("\n\n");
     }
 
@@ -187,6 +193,7 @@ export class CompletionComposer implements ICompletionComposer {
       filePath,
       prefix,
       suffix,
+      contextPrefix,
       files
     };
   }

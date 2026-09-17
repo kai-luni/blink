@@ -5,6 +5,15 @@ import type { SuffixSupport } from "../completion/suffixSupport.js";
 export interface FimParts {
   prefix: string;
   suffix: string;
+  /**
+   * Open-tab context that precedes the current file, kept apart from `prefix` so a
+   * FIM endpoint can place it *outside* its begin/hole/end markers. Measured
+   * 2026-09-17: with the context inside the markers DeepSeek-V4.1-Flash kept
+   * continuing the context document (`### <file>` sections) instead of filling the
+   * hole; outside the markers the inventions dropped (3/3 -> 0/3 in one sample).
+   * Absent when no tabs were eligible.
+   */
+  contextPrefix?: string;
 }
 
 /**

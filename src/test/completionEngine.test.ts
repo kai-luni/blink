@@ -124,4 +124,21 @@ suite("CompletionEngine", () => {
     const e = engineWith(fakeClient("x")); // fakeClient defines only complete()/getFimPrefix()
     assert.doesNotThrow(() => e.prewarm());
   });
+
+  test("passes the open-tab context as its own part, so FIM clients can keep it outside the markers", async () => {
+    const sink: { parts?: { prefix: string; suffix: string; contextPrefix?: string } } = {};
+    const fake = {
+      async complete(_prompt: string, _stop: string[], _signal: AbortSignal, parts?: { prefix: string; suffix: string; contextPrefix?: string }) {
+        sink.parts = parts;
+        return "";
+      },
+      async getFimPrefix() { return null; },
+    };
+    const e = new CompletionEngine(new FimTemplates(), new CompletionCache(4));
+    e.setClient(fake as never);
+    await e.complete(req({ prefix: "const x = ", suffix: ";", contextPrefix: "### a.ts\nAAA" }), sig());
+    assert.deepStrictEqual(sink.parts, {
+      prefix: "const x = ", suffix: ";", contextPrefix: "### a.ts\nAAA",
+    });
+  });
 });

@@ -1,5 +1,22 @@
 # Change Log
 
+## [0.2.3] — 2026-09-17
+
+- **The open-tab context moved out of the FIM markers.** It used to be glued into the
+  prefix, so DeepSeek saw `### package.json`-style sections *inside* its
+  `<｜fim▁begin｜>…<｜fim▁hole｜>…<｜fim▁end｜>` block and continued that document instead of
+  filling the hole (measured: 3/3 such inventions with the context inside, 0/3 outside).
+  The composer now returns it as `contextPrefix`; the engine still renders it in front of
+  the file prefix for every existing template, and Mistral's prefix-suffix body keeps it
+  in the prompt — only the DeepSeek path places it before the markers.
+- **`max_tokens` for the DeepSeek FIM path: 512 → 192.** Output length *is* the cap:
+  every run against the real prompts ends with `finish_reason: "length"`, and 512 tokens
+  came back as 1700-character ghost text.
+- **DeepSeek FIM has a template of its own** (`fimTemplates.ts`, selected by
+  `fim: "<｜fim▁begin｜>"`): markers plus its own stop list, next to the Qwen tokens
+  instead of hardcoded in the client. Note the stop entry is insurance only — the model
+  stops on EOS and never emits `<｜fim▁end｜>` (checked against Nebius).
+
 ## [0.2.2] — 2026-09-17
 
 - **The cursor's completion items are out of the prompt.** Measured against

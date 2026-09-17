@@ -23,6 +23,8 @@ export interface CompletionRequest {
   filePath?: string,
   prefix: string;
   suffix: string;
+  /** Open-tab context ahead of the current file (see FimParts.contextPrefix). */
+  contextPrefix?: string;
   files: CompletionRequestFile[]
 
   // fullText: string;
@@ -65,6 +67,21 @@ export class CompletionEngine implements ICompletionEngine {
   ) { }
 
 
+
+  /**
+   * The untemplated halves handed to the client. `contextPrefix` stays a separate
+   * field (and is omitted when empty) so clients that template themselves can keep
+   * the context outside their FIM markers.
+   */
+  private clientParts(req: CompletionRequest): {
+    prefix: string;
+    suffix: string;
+    contextPrefix?: string;
+  } {
+    return req.contextPrefix
+      ? { prefix: req.prefix, suffix: req.suffix, contextPrefix: req.contextPrefix }
+      : { prefix: req.prefix, suffix: req.suffix };
+  }
 
   setClient(client: CompletionClient): void {
     this.client = client;
@@ -131,7 +148,16 @@ export class CompletionEngine implements ICompletionEngine {
     let raw: string;
 
     try {
-      const prompt = fimTemplate.render(req);
+      /*
+       * Templates that do not know about contextPrefix still get the context in the
+       * prefix, exactly as before — only the DeepSeek path (which rebuilds the prompt
+       * from the parts) places it outside the FIM markers.
+       */
+      const prompt = fimTemplate.render(
+        req.contextPrefix
+          ? { ...req, prefix: `${req.contextPrefix}\n\n${req.prefix}` }
+          : req,
+      );
 
       await writeLlmLog("REQUEST", {
         repoName: req.repoName,
@@ -154,20 +180,14 @@ export class CompletionEngine implements ICompletionEngine {
         * Der Mistral-prefix-suffix-Client kann daraus prompt und suffix
         * für /v1/fim/completions bilden.
         */
-        clientContext: {
-          prefix: req.prefix,
-          suffix: req.suffix,
-        },
+        clientContext: this.clientParts(req),
       });
 
       raw = await this.client.complete(
         prompt,
         fimTemplate.stop,
         signal,
-        {
-          prefix: req.prefix,
-          suffix: req.suffix,
-        },
+        this.clientParts(req),
       );
 
       await writeLlmLog("RESPONSE", {

@@ -37,11 +37,12 @@ const DEEPSEEK_FIM_HOLE = "<｜fim▁hole｜>";
 const DEEPSEEK_FIM_END = "<｜fim▁end｜>";
 
 /**
- * Ghost text is a few lines at most. Measured 2026-09-17 against Nebius: with the
- * entry's 25600 the model kept writing whole blocks (and repeated them) whenever it
- * left the FIM hole; 512 bounds the request without cutting a plausible block off.
+ * Ghost text is a few lines at most, and this is the *only* brake that reliably holds:
+ * measured 2026-09-17 against Nebius, every DeepSeek run with the real prompts ended
+ * with `finish_reason: "length"` — the model stops on EOS only with a clean prompt.
+ * 512 tokens produced 1700-char answers, 192 produce roughly 600-800.
  */
-const DEEPSEEK_FIM_MAX_TOKENS = 512;
+const DEEPSEEK_FIM_MAX_TOKENS = 192;
 
 /** Suffix sent with the probe: long enough to visibly move the prompt token count. */
 const PROBE_SUFFIX = "// suffix support probe line\n".repeat(8);
@@ -366,7 +367,17 @@ export class OpenAICompletionClient implements ManagedClient {
      * The full-width vertical bars and ▁ character are intentional.
      */
     if (usesDeepSeekFim && parts) {
+      /*
+       * The open-tab context stays OUTSIDE the markers: with it inside, the model kept
+       * continuing the context document (`### <file>` sections) instead of filling the
+       * hole — measured 3/3 such inventions with the context inside, 0/3 outside.
+       */
+      const context = parts.contextPrefix
+        ? `${parts.contextPrefix}\n\n`
+        : "";
+
       const fimPrompt =
+        context +
         DEEPSEEK_FIM_BEGIN +
         parts.prefix +
         DEEPSEEK_FIM_HOLE +
@@ -397,9 +408,18 @@ export class OpenAICompletionClient implements ManagedClient {
       const completionInstruction =
         "// Use English for new comments unless surrounding comments use another language.\n";
 
+      /*
+       * No FIM markers on this route (Mistral templates server-side), so the context
+       * keeps its place in the prompt — moving it would silently drop the open tabs
+       * for Codestral.
+       */
+      const context = parts.contextPrefix
+        ? `${parts.contextPrefix}\n\n`
+        : "";
+
       return {
         model: opts.model,
-        prompt: `${completionInstruction}${parts.prefix}`,
+        prompt: `${completionInstruction}${context}${parts.prefix}`,
         suffix: parts.suffix,
         max_tokens: opts.maxTokens,
         temperature: 0,
