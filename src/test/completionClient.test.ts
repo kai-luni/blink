@@ -339,12 +339,36 @@ suite("OpenAICompletionClient — DeepSeek-V4.1-Flash (Nebius)", () => {
     assert.strictEqual(called, 0);
   });
 
-  test("the FIM end token is always part of stop, so it cannot leak into ghost text", async () => {
+  test("stop carries the FIM end token and the blank-line breaks, deduplicated", async () => {
     const captured: any = {};
     const client = new OpenAICompletionClient(fakeFetch(captured) as any);
     client.setConfig(deepSeekEntry());
-    await client.complete("P", ["</s>"], new AbortController().signal, { prefix: "a", suffix: "b" });
-    assert.deepStrictEqual(captured.body.stop, ["</s>", DS_END]);
+    await client.complete("P", ["</s>", "\n\n"], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.deepStrictEqual(captured.body.stop, ["</s>", "\n\n", DS_END, "\r\n\r\n"]);
+  });
+
+  test("max_tokens is capped for the FIM path (the entry's 25600 would run away on a loop)", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry({ maxTokens: 25600 }));
+    await client.complete("P", [], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.strictEqual(captured.body.max_tokens, 512);
+  });
+
+  test("a smaller maxTokens from the entry wins over the cap", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry({ maxTokens: 64 }));
+    await client.complete("P", [], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.strictEqual(captured.body.max_tokens, 64);
+  });
+
+  test("temperature stays low (0.2) — raising it made the model repeat instead of filling", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry());
+    await client.complete("P", [], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.strictEqual(captured.body.temperature, 0.2);
   });
 
   test("a lowercase model id from another gateway is detected too", async () => {

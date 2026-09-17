@@ -36,6 +36,21 @@ const DEEPSEEK_FIM_BEGIN = "<｜fim▁begin｜>";
 const DEEPSEEK_FIM_HOLE = "<｜fim▁hole｜>";
 const DEEPSEEK_FIM_END = "<｜fim▁end｜>";
 
+/**
+ * Ghost text is a few lines at most. Measured 2026-09-17 against Nebius: with the
+ * entry's 25600 the model kept writing whole blocks (and repeated them) whenever it
+ * left the FIM hole; 512 bounds the request without cutting a plausible block off.
+ */
+const DEEPSEEK_FIM_MAX_TOKENS = 512;
+
+/**
+ * Stop at the first blank line as well. The DeepSeek prompt carries the open-tabs
+ * context, and without this the model continues that document instead of filling the
+ * hole (measured: 1139 -> 111 characters of output; both line endings, because the
+ * files arrive with \r\n).
+ */
+const DEEPSEEK_FIM_EXTRA_STOP = ["\n\n", "\r\n\r\n"];
+
 /** Suffix sent with the probe: long enough to visibly move the prompt token count. */
 const PROBE_SUFFIX = "// suffix support probe line\n".repeat(8);
 
@@ -363,11 +378,15 @@ export class OpenAICompletionClient implements ManagedClient {
       return {
         model: opts.model,
         prompt: fimPrompt,
-        max_tokens: opts.maxTokens,
-        temperature: 0.5,
+        max_tokens: Math.min(opts.maxTokens, DEEPSEEK_FIM_MAX_TOKENS),
+        /*
+         * 0.2, not 0.5: raising it made the model repeat the last line instead of
+         * filling the hole (measured: temperature 0.7 -> "export" 28 times in a row).
+         */
+        temperature: 0.2,
         frequency_penalty: 0.2,
         repetition_penalty: 1.05,
-        stop: [...new Set([...stop, DEEPSEEK_FIM_END])],
+        stop: [...new Set([...stop, DEEPSEEK_FIM_END, ...DEEPSEEK_FIM_EXTRA_STOP])],
       };
     }
 
