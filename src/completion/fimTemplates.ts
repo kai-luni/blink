@@ -42,6 +42,21 @@ const qwen: FimTemplate = {
   },
 };
 
+/**
+ * DeepSeek native FIM (`<｜fim▁begin｜>…<｜fim▁hole｜>…<｜fim▁end｜>`).
+ *
+ * The markers are real tokens of DeepSeek-V4.x (ids 128801 / 128800 / 128802, checked
+ * in the HF tokenizer of DeepSeek-V4.1-Flash), so this belongs next to the Qwen tokens
+ * instead of being hardcoded in the client. The model never *emits* the end marker —
+ * it stops on EOS — so the stop entry is insurance against the marker leaking into the
+ * ghost text, not a brake: measured output length is bounded by max_tokens.
+ */
+const deepseek: FimTemplate = {
+  stop: ["<｜fim▁end｜>"],
+  render: ({ prefix, suffix }: CompletionRequest) =>
+    `<｜fim▁begin｜>${prefix}<｜fim▁hole｜>${suffix}<｜fim▁end｜>`,
+};
+
 const def: FimTemplate = {
   stop: [],
   render: ({ prefix, suffix, filePath, repoName, files }: CompletionRequest) => {
@@ -53,6 +68,10 @@ export class FimTemplates {
   get(prefix: string) {
     if (prefix === "<|fim_prefix|>") {
       return qwen;
+    }
+
+    if (prefix === "<｜fim▁begin｜>") {
+      return deepseek;
     }
 
     return def;

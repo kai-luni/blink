@@ -58,4 +58,16 @@ suite("FimTemplates", () => {
     assert.strictEqual(t.render(req({ prefix: "PRE", suffix: "SUF" })), "PRE<|cursor|>SUF");
     assert.deepStrictEqual(t.stop, []);
   });
+
+  test("the deepseek begin marker selects its own template with its own stop list", () => {
+    const t = fims.get("<\uff5cfim\u2581begin\uff5c>");
+    assert.strictEqual(
+      t.render(req({ prefix: "PRE", suffix: "SUF" })),
+      "<\uff5cfim\u2581begin\uff5c>PRE<\uff5cfim\u2581hole\uff5c>SUF<\uff5cfim\u2581end\uff5c>",
+    );
+    assert.deepStrictEqual(t.stop, ["<\uff5cfim\u2581end\uff5c>"]);
+    // the Qwen tokens must not leak into this route
+    assert.ok(!t.stop.includes("<|repo_name|>"));
+    assert.ok(!t.stop.includes("<|endoftext|>"));
+  });
 });
