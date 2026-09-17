@@ -3,6 +3,7 @@ import { isModelConfigured, modelTarget } from "./config/models.js";
 import { StatusStore } from "./status/statusStore.js";
 import { ICompletionEngine } from "./completion/completionEngine.js";
 import { ICompletionClientManager } from "./clients/manager.js";
+import type { CompletionClient } from "./clients/types.js";
 import { ILspContextProvider } from "./context/lspContext.js";
 import { IInlineCompletionItemProvider } from "./provider/inlineProvider.js";
 import { ISetupController } from "./setup/setupController.js";
@@ -78,9 +79,11 @@ export class BlinkExtension {
     });
 
     let clientReady = false;
+    let client: CompletionClient | undefined;
     if (active && configured) {
       try {
-        this.engine.setClient(this.clients.get(active));
+        client = this.clients.get(active);
+        this.engine.setClient(client);
         clientReady = true;
       } catch {
         // Unimplemented/unavailable backend (e.g. ollama): surface via status,
@@ -91,6 +94,12 @@ export class BlinkExtension {
     this.inlineProvider.setModel(clientReady ? active : undefined);
     this.inlineProvider.setEnabled(config.enabled && clientReady);
     this.lsp.clear();
+    if (clientReady && client?.probeSuffixSupport) {
+      // Fire-and-forget: off the keystroke path, never throws. Logs a visible
+      // warning (and a SUFFIX_PROBE entry in ~/blink-llm.log) when the endpoint
+      // drops the `suffix` field of a prefix-suffix entry.
+      void client.probeSuffixSupport();
+    }
     if (clientReady && active?.backend === "llamacpp") {
       void this.cuda.offerIfApplicable(active);
     }

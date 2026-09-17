@@ -1,4 +1,5 @@
 import type { ModelConfig } from "../config/models.js";
+import type { SuffixSupport } from "../completion/suffixSupport.js";
 
 /** The untemplated context halves, for clients whose endpoint templates server-side. */
 export interface FimParts {
@@ -17,6 +18,13 @@ export interface CompletionClient {
   /** Optional eager load so the first complete() has no startup lag. Stateless clients omit it. */
   prewarm?(): void;
   getFimPrefix(): Promise<string | null>;
+  /**
+   * Optional: does the endpoint actually honour the separate `suffix` field?
+   * Only prefix-suffix entries answer; everyone else returns "unknown". Called
+   * once per config change by the composition root, never on the keystroke path.
+   * Must never throw.
+   */
+  probeSuffixSupport?(): Promise<SuffixSupport>;
   config?: ModelConfig;
 }
 

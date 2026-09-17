@@ -6,6 +6,7 @@ import {
 } from "../../config/models.js";
 import type { ILogger } from "../../common/logging.js";
 import { writeLlmLog } from "../../common/llmDebugLog.js";
+import { suffixVerdict, type SuffixSupport } from "../../completion/suffixSupport.js";
 
 interface OpenAiOpts {
   baseUrl: string;
@@ -35,9 +36,14 @@ const DEEPSEEK_FIM_BEGIN = "<｜fim▁begin｜>";
 const DEEPSEEK_FIM_HOLE = "<｜fim▁hole｜>";
 const DEEPSEEK_FIM_END = "<｜fim▁end｜>";
 
+/** Suffix sent with the probe: long enough to visibly move the prompt token count. */
+const PROBE_SUFFIX = "// suffix support probe line\n".repeat(8);
+
 export class OpenAICompletionClient implements ManagedClient {
   private opts: OpenAiOpts | undefined;
   private model: OpenAiModelConfig | undefined;
+  private suffixSupport: SuffixSupport = "unknown";
+  private probeInFlight: Promise<SuffixSupport> | undefined;
 
   constructor(
     private readonly fetchFn: typeof fetch = fetch,
@@ -57,6 +63,9 @@ export class OpenAICompletionClient implements ManagedClient {
       timeoutMs: requestTimeoutFor(m),
       promptStyle: m.promptStyle ?? "raw",
     };
+    // A new entry may point at a different endpoint: forget the old verdict.
+    this.suffixSupport = "unknown";
+    this.probeInFlight = undefined;
   }
 
   onLoadError(): void {
@@ -75,6 +84,99 @@ export class OpenAICompletionClient implements ManagedClient {
     return this.model?.fim ?? null;
   }
 
+  /**
+   * One-time capability check for `promptStyle: "prefix-suffix"`. A provider that
+   * does not support the field accepts it (additionalProperties: true) and drops
+   * it without any error, so the only way to know is to send the same prompt
+   * twice — once with a long suffix — and compare `usage.prompt_tokens`. Never
+   * throws; "unknown" leaves the request shape exactly as it was.
+   */
+  async probeSuffixSupport(): Promise<SuffixSupport> {
+    const opts = this.opts;
+
+    if (!opts || opts.promptStyle !== "prefix-suffix") {
+      return this.suffixSupport;
+    }
+
+    if (this.suffixSupport !== "unknown") {
+      return this.suffixSupport;
+    }
+
+    this.probeInFlight ??= this.runProbe(opts);
+
+    const verdict = await this.probeInFlight;
+
+    this.probeInFlight = undefined;
+    this.suffixSupport = verdict;
+
+    await writeLlmLog("SUFFIX_PROBE", {
+      url: this.buildCompletionUrl(opts.baseUrl),
+      model: opts.model,
+      verdict,
+      probeSuffixChars: PROBE_SUFFIX.length,
+    });
+
+    if (verdict === "ignored") {
+      this.logger?.error(
+        `blink: ${opts.baseUrl} ignores the "suffix" field (usage.prompt_tokens is the same with and ` +
+        `without it) — the code after the cursor never reaches the model. Falling back to a locally ` +
+        `templated prompt; set "promptStyle": "raw" for this entry to make that explicit.`,
+      );
+    }
+
+    return verdict;
+  }
+
+  private async runProbe(opts: OpenAiOpts): Promise<SuffixSupport> {
+    const [withSuffix, without] = await Promise.all([
+      this.probeOnce(opts, PROBE_SUFFIX),
+      this.probeOnce(opts, undefined),
+    ]);
+
+    return suffixVerdict(withSuffix, without);
+  }
+
+  /** One probe request; returns usage.prompt_tokens, or undefined on any failure. */
+  private async probeOnce(
+    opts: OpenAiOpts,
+    suffix: string | undefined,
+  ): Promise<number | undefined> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort();
+    }, opts.timeoutMs);
+
+    try {
+      const res = await this.fetchFn(this.buildCompletionUrl(opts.baseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${opts.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          prompt: "probe",
+          ...(suffix ? { suffix } : {}),
+          max_tokens: 1,
+          temperature: 0,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        return undefined;
+      }
+
+      const data = (await res.json()) as CompletionResponse;
+
+      return data.usage?.prompt_tokens;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async complete(
     prompt: string,
     stop: string[],
@@ -87,14 +189,25 @@ export class OpenAICompletionClient implements ManagedClient {
       return "";
     }
 
+    /*
+     * A prefix-suffix entry behind an endpoint that drops the suffix (probed
+     * once per config change) must not go out as prefix-only — the code after
+     * the cursor would be missing. DeepSeek models then get the native FIM
+     * tokens instead, everything else the locally templated prompt.
+     */
+    const suffixIgnored =
+      opts.promptStyle === "prefix-suffix" &&
+      this.suffixSupport === "ignored";
+
     const usesPrefixSuffix =
       opts.promptStyle === "prefix-suffix" &&
+      !suffixIgnored &&
       parts !== undefined;
 
     const usesDeepSeekFim =
-      opts.promptStyle === "raw" &&
-      this.isDeepSeekFimModel(opts.model) &&
-      parts !== undefined;
+      parts !== undefined &&
+      !usesPrefixSuffix &&
+      this.isDeepSeekFimModel(opts.model);
 
     const url = this.buildCompletionUrl(opts.baseUrl);
 
@@ -254,7 +367,7 @@ export class OpenAICompletionClient implements ManagedClient {
         temperature: 0.5,
         frequency_penalty: 0.2,
         repetition_penalty: 1.05,
-        ...(stop.length > 0 ? { stop } : {}),
+        stop: [...new Set([...stop, DEEPSEEK_FIM_END])],
       };
     }
 
