@@ -1,5 +1,24 @@
 # Change Log
 
+## [0.2.1] — 2026-09-17
+
+- **Endpoints that silently drop the `suffix` field are detected.** With
+  `promptStyle: "prefix-suffix"` blink now probes once per config change (same
+  prompt sent twice, once with a long suffix) and compares `usage.prompt_tokens`.
+  A provider that ignores the field answers with the same count — no error, which
+  is why this went unnoticed (Nebius Token Factory `/v1/completions` is one).
+  The verdict is written to `~/blink-llm.log` (`SUFFIX_PROBE`) and, when the field
+  is ignored, reported in the blink output channel.
+- **Fallback instead of silent degradation.** An ignored suffix no longer sends a
+  prefix-only request: DeepSeek models fall back to the native FIM tokens
+  (`<｜fim▁begin｜>…<｜fim▁hole｜>…<｜fim▁end｜>`), every other model to the locally
+  templated prompt.
+- **DeepSeek-V4.1-Flash on Nebius** works through the native FIM path
+  (`promptStyle: "raw"`, model id `deepseek-ai/DeepSeek-V4.1-Flash`): verified
+  live against the endpoint, including the sampling parameters.
+- The DeepSeek FIM request always carries the FIM end token in `stop`, so it
+  cannot leak into the ghost text.
+
 ## [0.1.5] — 2026-07-17
 
 - **Mistral Codestral support**: the `openai` backend gained
