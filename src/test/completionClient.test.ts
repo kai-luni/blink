@@ -74,7 +74,11 @@ suite("OpenAICompletionClient", () => {
     const client = new OpenAICompletionClient(fakeFetch(captured) as any);
     client.setConfig(openAiModel({ promptStyle: "prefix-suffix", apiBaseUrl: "https://api.mistral.ai/v1/fim", apiKey: "k", modelId: "codestral-2508", maxTokens: 10, requestTimeoutMs: 1000 }));
     await client.complete("RENDERED", ["</s>"], new AbortController().signal, { prefix: "const x = ", suffix: ";" });
-    assert.strictEqual(captured.body.prompt, "const x = ");
+    // The entry prepends a completion instruction to the prefix.
+    assert.ok(
+      String(captured.body.prompt).endsWith("const x = "),
+      `expected the prefix at the end of the prompt, got: ${JSON.stringify(captured.body.prompt)}`,
+    );
     assert.strictEqual(captured.body.suffix, ";");
     assert.deepStrictEqual(captured.body.stop, ["</s>"]);
   });
@@ -172,5 +176,182 @@ suite("OpenAICompletionClient", () => {
     const text = await client.complete("P", [], ctrl.signal);
     assert.strictEqual(text, "");
     void fetchCalled;
+  });
+});
+
+/** Probe pair: answers `usage.prompt_tokens` per request, suffix-aware. */
+function probeFetch(tokens: { withSuffix: number; withoutSuffix: number }) {
+  const seen: any[] = [];
+  const fn = async (_url: any, init: any): Promise<Response> => {
+    const body = JSON.parse(init.body);
+    seen.push(body);
+    const prompt_tokens = "suffix" in body ? tokens.withSuffix : tokens.withoutSuffix;
+    return new Response(
+      JSON.stringify({ choices: [{ text: "" }], usage: { prompt_tokens } }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  return { fn, seen };
+}
+
+const DS_BEGIN = "<\uff5cfim\u2581begin\uff5c>";
+const DS_HOLE = "<\uff5cfim\u2581hole\uff5c>";
+const DS_END = "<\uff5cfim\u2581end\uff5c>";
+
+suite("OpenAICompletionClient — suffix support probe", () => {
+  const entry = (over: any = {}) => openAiModel({
+    promptStyle: "prefix-suffix", apiBaseUrl: "https://api.example.com/v1",
+    modelId: "m", maxTokens: 10, requestTimeoutMs: 1000, ...over,
+  });
+
+  test("reports 'ignored' when the token count does not move", async () => {
+    const { fn, seen } = probeFetch({ withSuffix: 12, withoutSuffix: 12 });
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry());
+    assert.strictEqual(await client.probeSuffixSupport(), "ignored");
+    assert.strictEqual(seen.length, 2);
+    assert.strictEqual(typeof seen[0].suffix, "string");
+    assert.strictEqual("suffix" in seen[1], false);
+  });
+
+  test("reports 'accepted' when the suffix enlarges the prompt", async () => {
+    const { fn } = probeFetch({ withSuffix: 47, withoutSuffix: 12 });
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry());
+    assert.strictEqual(await client.probeSuffixSupport(), "accepted");
+  });
+
+  test("probes once and caches the verdict", async () => {
+    const { fn, seen } = probeFetch({ withSuffix: 12, withoutSuffix: 12 });
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry());
+    await client.probeSuffixSupport();
+    await client.probeSuffixSupport();
+    assert.strictEqual(seen.length, 2);
+  });
+
+  test("raw entries never probe (no request leaves the client)", async () => {
+    let called = 0;
+    const fn = async (): Promise<Response> => { called++; return new Response("{}", { status: 200 }); };
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(openAiModel({ apiBaseUrl: "https://x/v1", modelId: "m", maxTokens: 10, requestTimeoutMs: 1000 }));
+    assert.strictEqual(await client.probeSuffixSupport(), "unknown");
+    assert.strictEqual(called, 0);
+  });
+
+  test("keeps 'unknown' when the provider returns no usage block", async () => {
+    const fn = async (): Promise<Response> =>
+      new Response(JSON.stringify({ choices: [{ text: "" }] }), { status: 200 });
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry());
+    assert.strictEqual(await client.probeSuffixSupport(), "unknown");
+  });
+
+  test("names the provider and the fix in the log when the suffix is ignored", async () => {
+    const messages: string[] = [];
+    const { fn } = probeFetch({ withSuffix: 12, withoutSuffix: 12 });
+    const client = new OpenAICompletionClient(fn as any, {
+      info: (m: string) => messages.push(m),
+      error: (m: string) => messages.push(m),
+    });
+    client.setConfig(entry());
+    await client.probeSuffixSupport();
+    assert.ok(
+      messages.some((m) => m.includes("suffix") && m.includes("raw")),
+      `expected a warning naming the field and the fix, got: ${JSON.stringify(messages)}`,
+    );
+  });
+
+  test("after an 'ignored' verdict a plain prefix-suffix entry falls back to the rendered prompt", async () => {
+    const captured: any = {};
+    let calls = 0;
+    const fn = async (_url: any, init: any): Promise<Response> => {
+      const body = JSON.parse(init.body);
+      calls++;
+      if (calls <= 2) {
+        return new Response(
+          JSON.stringify({ choices: [{ text: "" }], usage: { prompt_tokens: 12 } }),
+          { status: 200 },
+        );
+      }
+      captured.body = body;
+      return new Response(JSON.stringify({ choices: [{ text: "OK" }] }), { status: 200 });
+    };
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry({ apiBaseUrl: "https://api.tokenfactory.nebius.com/v1" }));
+    await client.probeSuffixSupport();
+    const text = await client.complete("RENDERED", [], new AbortController().signal, { prefix: "PRE", suffix: "SUF" });
+    assert.strictEqual(text, "OK");
+    assert.strictEqual(captured.body.prompt, "RENDERED");
+    assert.strictEqual("suffix" in captured.body, false);
+  });
+
+  test("after an 'ignored' verdict a DeepSeek entry falls back to the native FIM tokens", async () => {
+    const captured: any = {};
+    let calls = 0;
+    const fn = async (_url: any, init: any): Promise<Response> => {
+      const body = JSON.parse(init.body);
+      calls++;
+      if (calls <= 2) {
+        return new Response(
+          JSON.stringify({ choices: [{ text: "" }], usage: { prompt_tokens: 12 } }),
+          { status: 200 },
+        );
+      }
+      captured.body = body;
+      return new Response(JSON.stringify({ choices: [{ text: "OK" }] }), { status: 200 });
+    };
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(entry({
+      apiBaseUrl: "https://api.tokenfactory.nebius.com/v1",
+      modelId: "deepseek-ai/DeepSeek-V4.1-Flash",
+    }));
+    await client.probeSuffixSupport();
+    await client.complete("RENDERED", [], new AbortController().signal, { prefix: "PRE", suffix: "SUF" });
+    assert.strictEqual(captured.body.prompt, DS_BEGIN + "PRE" + DS_HOLE + "SUF" + DS_END);
+    assert.strictEqual("suffix" in captured.body, false);
+  });
+});
+
+suite("OpenAICompletionClient — DeepSeek-V4.1-Flash (Nebius)", () => {
+  const deepSeekEntry = (over: any = {}) => openAiModel({
+    promptStyle: "raw",
+    apiBaseUrl: "https://api.tokenfactory.nebius.com/v1",
+    modelId: "deepseek-ai/DeepSeek-V4.1-Flash",
+    maxTokens: 10, requestTimeoutMs: 1000, ...over,
+  });
+
+  test("raw mode renders the native DeepSeek FIM prompt, not the generic template", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry());
+    await client.complete("GENERIC-RENDERED", [], new AbortController().signal, { prefix: "def f():\n    return ", suffix: "\n\nx = 1\n" });
+    assert.strictEqual(captured.body.prompt, DS_BEGIN + "def f():\n    return " + DS_HOLE + "\n\nx = 1\n" + DS_END);
+    assert.strictEqual("suffix" in captured.body, false);
+  });
+
+  test("raw mode never probes (the endpoint contract is not needed)", async () => {
+    let called = 0;
+    const fn = async (): Promise<Response> => { called++; return new Response("{}", { status: 200 }); };
+    const client = new OpenAICompletionClient(fn as any);
+    client.setConfig(deepSeekEntry());
+    assert.strictEqual(await client.probeSuffixSupport(), "unknown");
+    assert.strictEqual(called, 0);
+  });
+
+  test("the FIM end token is always part of stop, so it cannot leak into ghost text", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry());
+    await client.complete("P", ["</s>"], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.deepStrictEqual(captured.body.stop, ["</s>", DS_END]);
+  });
+
+  test("a lowercase model id from another gateway is detected too", async () => {
+    const captured: any = {};
+    const client = new OpenAICompletionClient(fakeFetch(captured) as any);
+    client.setConfig(deepSeekEntry({ apiBaseUrl: "https://api.deepseek.com/beta", modelId: "deepseek-v4-pro" }));
+    await client.complete("GENERIC", [], new AbortController().signal, { prefix: "a", suffix: "b" });
+    assert.strictEqual(captured.body.prompt, DS_BEGIN + "a" + DS_HOLE + "b" + DS_END);
   });
 });
