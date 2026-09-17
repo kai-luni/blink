@@ -137,31 +137,21 @@ export class CompletionComposer implements ICompletionComposer {
       }
     }
 
-    // Unit tests drive compose() with minimal fakes that have no uri; skip the
-    // completion-provider lookup for them (real documents always carry one).
-    const completions = document.uri
-      ? await vscode.commands.executeCommand<vscode.CompletionList>(
-        "vscode.executeCompletionItemProvider",
-        document.uri,
-        position
-      )
-      : undefined;
-
-    const completionItems =
-      completions?.items
-        .filter(item => this.shouldKeepCompletion(item))
-        .slice(0, 80)
-        .map(item => this.normalizeCompletionItem(item)) ?? [];
-
-    if (completionItems.length) {
-      // files.push({
-      //   path: './cursor-context.ts',
-      //   content: `{\n${completionItems.map(x => `${x.label}: ${x.insertText},`).join('\n')}\n}`
-      // });
-      prefix = `/*
-context: {\n${completionItems.map(x => `${x.label}: ${x.insertText},`).join('\n')}\n}
-*/\n` + prefix;
-    }
+    /*
+     * The cursor's completion items are deliberately NOT requested any more.
+     *
+     * Measured 2026-09-17 against DeepSeek-V4.1-Flash (Nebius): feeding up to 80 of them
+     * into the prompt — for a TypeScript file that is the whole global symbol table —
+     * produced a request of 12.603 characters, of which only 464 were the real prefix
+     * before the cursor. Ahead of the FIM hole that much noise made the model continue
+     * the "### <file>" document instead of filling the hole. Skipping the lookup also
+     * saves one `executeCompletionItemProvider` round-trip per completion.
+     *
+     * The open tabs (MAX_OPEN_TABS below) stay in the prompt — that is the part which
+     * demonstrably helps. `shouldKeepCompletion`/`normalizeCompletionItem` stay in the
+     * class for the experiment; the previous implementation (executeCommand + the
+     * "/* context: ..." prefix prepend) is in the commit before this one.
+     */
 
     if (files.length > 0) {
       const openTabsContext = files
