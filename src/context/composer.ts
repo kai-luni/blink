@@ -52,6 +52,7 @@ export class CompletionComposer implements ICompletionComposer {
     const MAX_TOTAL_CONTEXT_CHARS = 80_000;
 
     let totalContextChars = 0;
+    const seenUris = new Set<string>([document.uri.toString()]);
 
     for (const group of vscode.window.tabGroups.all) {
       for (const tab of group.tabs) {
@@ -60,6 +61,12 @@ export class CompletionComposer implements ICompletionComposer {
         }
 
         const uri = tab.input.uri;
+        const uriKey = uri.toString();
+        //Skip the active file: its prefix and suffix are already sent separately. Skip the active file: its prefix and suffix are already sent separately.        // The active file is already excluded via seenUris above.
+        if (seenUris.has(uriKey)) {
+          continue;
+        }
+        seenUris.add(uriKey);
 
         // Do not include the active file as additional context.
         // Its prefix and suffix are already passed separately.
@@ -103,7 +110,8 @@ export class CompletionComposer implements ICompletionComposer {
 
         try {
           const openDocument =
-            await vscode.workspace.openTextDocument(uri);
+            vscode.workspace.textDocuments.find(candidate => candidate.uri.toString() === uriKey)
+            ?? await vscode.workspace.openTextDocument(uri);
 
           const fullContent = openDocument.getText();
 

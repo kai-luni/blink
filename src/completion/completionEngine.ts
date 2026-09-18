@@ -1,6 +1,6 @@
 import type { BlinkConfig } from "../config/config.js";
 import type { ModelConfig } from "../config/models.js";
-import type { CompletionClient } from "../clients/types.js";
+import type { CompletionClient, FimParts } from "../clients/types.js";
 import { CompletionCache } from "../cache.js";
 import { assembleContext } from "./contextAssembler.js";
 import { postProcess } from "./postProcess.js";
@@ -73,14 +73,14 @@ export class CompletionEngine implements ICompletionEngine {
    * field (and is omitted when empty) so clients that template themselves can keep
    * the context outside their FIM markers.
    */
-  private clientParts(req: CompletionRequest): {
-    prefix: string;
-    suffix: string;
-    contextPrefix?: string;
-  } {
-    return req.contextPrefix
-      ? { prefix: req.prefix, suffix: req.suffix, contextPrefix: req.contextPrefix }
-      : { prefix: req.prefix, suffix: req.suffix };
+  private clientParts(req: CompletionRequest): FimParts {
+    return {
+      prefix: req.prefix,
+      suffix: req.suffix,
+      ...(req.contextPrefix ? { contextPrefix: req.contextPrefix } : {}),
+      filePath: req.filePath,
+      referenceFiles: req.files,
+    };
   }
 
   setClient(client: CompletionClient): void {

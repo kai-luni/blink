@@ -3,6 +3,9 @@ import type { SuffixSupport } from "../completion/suffixSupport.js";
 
 /** The untemplated context halves, for clients whose endpoint templates server-side. */
 export interface FimParts {
+  /** Structured tab context for chat completion clients. */
+  filePath?: string;
+  referenceFiles?: Array<{ path: string; content: string }>;
   prefix: string;
   suffix: string;
   /**
